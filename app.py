@@ -122,18 +122,28 @@ with tab_rec:
     audio_input = st.audio_input("🎤  Click to record")
 
     if audio_input is not None:
-        with st.spinner("Loading recording…"):
-            y, sr = load_audio_bytes(audio_input.read(), "recording.wav")
+        raw_bytes = audio_input.read()
+
+        # Playback: use raw bytes directly (no re-encoding)
+        st.success("Recording ready — press play to listen:")
+        st.audio(raw_bytes, format="audio/wav")
+
+        # Load into numpy for Edit tab processing
+        with st.spinner("Preparing for editing…"):
+            y, sr = load_audio_bytes(raw_bytes, "recording.wav")
         st.session_state.recorded_audio = (y, sr)
         st.session_state.working_audio  = (y, sr)
-        st.success(f"Recorded  {len(y)/sr:.1f} s  @  {sr} Hz")
-        st.audio(to_wav_bytes(y, sr), format="audio/wav")
+        st.caption(f"Duration: {len(y)/sr:.1f}s  |  Sample rate: {sr} Hz")
 
-        fname = st.text_input("Save filename", value="recording.wav")
-        if st.button("💾  Save to disk", key="save_rec"):
-            out = Path(fname)
-            sf.write(str(out), y, sr)
-            st.success(f"Saved → {out.resolve()}")
+        # Download button — opens browser save dialog (Windows file picker)
+        fname = st.text_input("Filename", value="recording.wav")
+        st.download_button(
+            label="💾  Save to disk",
+            data=raw_bytes,
+            file_name=fname,
+            mime="audio/wav",
+            key="dl_rec",
+        )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 – UPLOAD
@@ -264,20 +274,32 @@ with tab_edit:
         seg_name   = sc1.text_input("Segment filename", "segment.wav")
         seg_format = sc2.selectbox("Format", ["WAV", "MP3", "FLAC"], key="seg_fmt")
 
-        if st.button("💾  Save segment to disk"):
-            if len(segment) == 0:
-                st.error("Segment is empty – adjust start / end times.")
-            else:
-                out_path = Path(seg_name).with_suffix("." + seg_format.lower())
-                if seg_format == "WAV":
-                    sf.write(str(out_path), segment, sr)
-                else:
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                        sf.write(tmp.name, segment, sr)
-                        audio_seg = AudioSegment.from_wav(tmp.name)
-                        os.unlink(tmp.name)
-                    audio_seg.export(str(out_path), format=seg_format.lower())
-                st.success(f"Saved → {out_path.resolve()}")
+        if len(segment) == 0:
+            st.warning("Segment is empty – adjust start / end times.")
+        else:
+            def _encode(data: np.ndarray, rate: int, fmt: str) -> tuple[bytes, str]:
+                buf = io.BytesIO()
+                if fmt == "WAV":
+                    sf.write(buf, data, rate, format="WAV")
+                    return buf.getvalue(), "audio/wav"
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    sf.write(tmp.name, data, rate)
+                    audio_seg = AudioSegment.from_wav(tmp.name)
+                    os.unlink(tmp.name)
+                out_buf = io.BytesIO()
+                audio_seg.export(out_buf, format=fmt.lower())
+                mime = "audio/mpeg" if fmt == "MP3" else "audio/flac"
+                return out_buf.getvalue(), mime
+
+            seg_bytes, seg_mime = _encode(segment, sr, seg_format)
+            seg_fname = str(Path(seg_name).with_suffix("." + seg_format.lower()))
+            st.download_button(
+                label="💾  Save segment to disk",
+                data=seg_bytes,
+                file_name=seg_fname,
+                mime=seg_mime,
+                key="dl_seg",
+            )
 
         st.divider()
 
@@ -288,14 +310,26 @@ with tab_edit:
         full_name   = fc1.text_input("Output filename", "output.wav")
         full_format = fc2.selectbox("Format", ["WAV", "MP3", "FLAC"], key="full_fmt")
 
-        if st.button("💾  Save full audio to disk"):
-            out_path = Path(full_name).with_suffix("." + full_format.lower())
-            if full_format == "WAV":
-                sf.write(str(out_path), y, sr)
-            else:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                    sf.write(tmp.name, y, sr)
-                    audio_seg = AudioSegment.from_wav(tmp.name)
-                    os.unlink(tmp.name)
-                audio_seg.export(str(out_path), format=full_format.lower())
-            st.success(f"Saved → {out_path.resolve()}")
+        def _encode_full(data: np.ndarray, rate: int, fmt: str) -> tuple[bytes, str]:
+            buf = io.BytesIO()
+            if fmt == "WAV":
+                sf.write(buf, data, rate, format="WAV")
+                return buf.getvalue(), "audio/wav"
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                sf.write(tmp.name, data, rate)
+                audio_seg = AudioSegment.from_wav(tmp.name)
+                os.unlink(tmp.name)
+            out_buf = io.BytesIO()
+            audio_seg.export(out_buf, format=fmt.lower())
+            mime = "audio/mpeg" if fmt == "MP3" else "audio/flac"
+            return out_buf.getvalue(), mime
+
+        full_bytes, full_mime = _encode_full(y, sr, full_format)
+        full_fname = str(Path(full_name).with_suffix("." + full_format.lower()))
+        st.download_button(
+            label="💾  Save full audio to disk",
+            data=full_bytes,
+            file_name=full_fname,
+            mime=full_mime,
+            key="dl_full",
+        )
