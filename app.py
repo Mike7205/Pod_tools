@@ -107,7 +107,8 @@ def encode_for_download(y: np.ndarray, sr: int, fmt: str) -> tuple[bytes, str]:
 # ─── Waveform plot ────────────────────────────────────────────────────────────
 
 def plot_waveform(y: np.ndarray, sr: int, title: str = "",
-                  start_s: float = 0.0, end_s: float | None = None) -> plt.Figure:
+                  start_s: float = 0.0, end_s: float | None = None,
+                  color: str = "#1db954") -> plt.Figure:
     dur = len(y) / sr
     if end_s is None:
         end_s = dur
@@ -120,8 +121,8 @@ def plot_waveform(y: np.ndarray, sr: int, title: str = "",
 
     fig, ax = plt.subplots(figsize=(12, 3), facecolor="#0e1117")
     ax.set_facecolor("#0e1117")
-    ax.bar(t,  peaks, width=dur / len(peaks) * 0.85, color="#1db954", alpha=0.9)
-    ax.bar(t, -peaks, width=dur / len(peaks) * 0.85, color="#1db954", alpha=0.9)
+    ax.bar(t,  peaks, width=dur / len(peaks) * 0.85, color=color, alpha=0.9)
+    ax.bar(t, -peaks, width=dur / len(peaks) * 0.85, color=color, alpha=0.9)
     ax.axvline(start_s, color="#ff4b4b", linewidth=1.5, label=f"Start {start_s:.2f}s")
     ax.axvline(end_s,   color="#ffa64b", linewidth=1.5, label=f"End   {end_s:.2f}s")
     ax.set_xlim(0, dur)
@@ -139,9 +140,10 @@ def plot_waveform(y: np.ndarray, sr: int, title: str = "",
 
 
 def show_player(y: np.ndarray, sr: int, title: str = "",
-                start_s: float = 0.0, end_s: float | None = None) -> None:
+                start_s: float = 0.0, end_s: float | None = None,
+                color: str = "#1db954") -> None:
     """Show waveform + st.audio player."""
-    fig = plot_waveform(y, sr, title, start_s, end_s)
+    fig = plot_waveform(y, sr, title, start_s, end_s, color=color)
     st.pyplot(fig)
     plt.close(fig)
     st.audio(numpy_to_wav_bytes(y, sr), format="audio/wav")
@@ -309,10 +311,10 @@ with tab_edit:
     st.subheader("Waveform")
     if st.session_state.processed_audio is not None:
         y_proc, _ = st.session_state.processed_audio
-        st.caption("**Original**")
-        show_player(y_orig, sr)
-        st.caption("**Processed**")
-        show_player(y_proc, sr)
+        st.markdown("<span style='font-size:18px; color:#4a9eff; font-weight:600'>Original</span>", unsafe_allow_html=True)
+        show_player(y_orig, sr, color="#1db954")
+        st.markdown("<span style='font-size:18px; color:#ff4b4b; font-weight:600'>Processed</span>", unsafe_allow_html=True)
+        show_player(y_proc, sr, color="#4a9eff")
         y_work = y_proc
     else:
         show_player(y_orig, sr, "Working audio")
