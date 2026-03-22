@@ -4,7 +4,6 @@ Streamlit app for recording, uploading, and editing audio.
 Optimised for FSDZMIC S338 USB microphone.
 """
 
-import base64
 import io
 import os
 import subprocess
@@ -12,12 +11,14 @@ import tempfile
 from pathlib import Path
 
 import librosa
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import noisereduce as nr
 import numpy as np
 import requests
 import soundfile as sf
 import streamlit as st
-import streamlit.components.v1 as components
 from pydub import AudioSegment
 
 try:
@@ -86,87 +87,37 @@ def encode_audio(y: np.ndarray, sr: int, fmt: str) -> tuple[bytes, str]:
     return out.getvalue(), mime
 
 
-def wavesurfer_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954",
-                      progress_color: str = "#ff4b4b", height: int = 100) -> None:
-    """Embed an interactive WaveSurfer.js player with native audio fallback."""
-    b64 = base64.b64encode(mp3_bytes).decode()
-    uid = abs(hash(label + color))
-    html = f"""
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
-    <style>
-      .ws-wrap-{uid} {{ background:#0e1117; padding:10px 14px 8px; border-radius:8px; margin-bottom:4px; }}
-      .ws-label-{uid} {{ color:#aaa; font-size:12px; margin-bottom:6px; font-family:sans-serif; }}
-      .ws-controls-{uid} {{ display:flex; gap:10px; align-items:center; margin-top:8px; }}
-      .ws-btn-{uid} {{
-        background:#1db954; border:none; border-radius:50%; width:36px; height:36px;
-        cursor:pointer; color:#000; font-size:14px; display:flex; align-items:center; justify-content:center;
-      }}
-      .ws-btn-{uid}:hover {{ background:#17a349; }}
-      .ws-stop-{uid} {{
-        background:#555; border:none; border-radius:50%; width:30px; height:30px;
-        cursor:pointer; color:#fff; font-size:12px; display:flex; align-items:center; justify-content:center;
-      }}
-      .ws-stop-{uid}:hover {{ background:#777; }}
-      .ws-time-{uid} {{ color:#ccc; font-size:12px; font-family:monospace; margin-left:4px; }}
-      .ws-native-{uid} {{ width:100%; margin-top:6px; }}
-    </style>
-    <div class="ws-wrap-{uid}">
-      <div class="ws-label-{uid}">{label}</div>
-      <div id="ws-{uid}"></div>
-      <div class="ws-controls-{uid}">
-        <button class="ws-btn-{uid}" id="playpause-{uid}" title="Play / Pause">
-          <i class="fa fa-play"></i>
-        </button>
-        <button class="ws-stop-{uid}" id="stop-{uid}" title="Stop">
-          <i class="fa fa-stop"></i>
-        </button>
-        <span class="ws-time-{uid}" id="time-{uid}">0:00 / 0:00</span>
-      </div>
-      <audio class="ws-native-{uid}" id="native-{uid}" controls
-             src="data:audio/mp3;base64,{b64}"></audio>
-    </div>
-    <script>
-      (function() {{
-        const ws = WaveSurfer.create({{
-          container: '#ws-{uid}',
-          waveColor: '{color}',
-          progressColor: '{progress_color}',
-          height: {height},
-          barWidth: 2,
-          barGap: 1,
-          barRadius: 2,
-          normalize: true,
-          backend: 'MediaElement',
-          media: document.getElementById('native-{uid}'),
-        }});
-        ws.load('data:audio/mp3;base64,{b64}');
+def audio_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954") -> None:
+    """Show waveform plot + native st.audio player."""
+    if label:
+        st.caption(label)
+    st.audio(mp3_bytes, format="audio/mp3")
 
-        const btn  = document.getElementById('playpause-{uid}');
-        const stop = document.getElementById('stop-{uid}');
-        const time = document.getElementById('time-{uid}');
 
-        function fmt(s) {{
-          const m = Math.floor(s/60), sec = Math.floor(s%60);
-          return m+':'+(sec<10?'0':'')+sec;
-        }}
+def plot_waveform(y: np.ndarray, sr: int, title: str = "",
+                  start_s: float = 0.0, end_s: float | None = None) -> plt.Figure:
+    dur = len(y) / sr
+    if end_s is None:
+        end_s = dur
+    times = np.linspace(0, dur, num=min(len(y), 8000))   # downsample for speed
+    y_ds  = np.interp(times, np.linspace(0, dur, len(y)), y)
 
-        ws.on('ready', () => {{
-          time.textContent = '0:00 / ' + fmt(ws.getDuration());
-        }});
-        ws.on('audioprocess', () => {{
-          time.textContent = fmt(ws.getCurrentTime()) + ' / ' + fmt(ws.getDuration());
-        }});
-        ws.on('play',  () => btn.innerHTML = '<i class="fa fa-pause"></i>');
-        ws.on('pause', () => btn.innerHTML = '<i class="fa fa-play"></i>');
-        ws.on('finish',() => {{ btn.innerHTML = '<i class="fa fa-play"></i>'; }});
-
-        btn.addEventListener('click', () => ws.playPause());
-        stop.addEventListener('click', () => {{ ws.stop(); btn.innerHTML='<i class="fa fa-play"></i>'; }});
-      }})();
-    </script>
-    """
-    components.html(html, height=height + 90)
+    fig, ax = plt.subplots(figsize=(12, 2.5), facecolor="#0e1117")
+    ax.set_facecolor("#0e1117")
+    ax.fill_between(times, y_ds, color="#1db954", alpha=0.85, linewidth=0)
+    ax.axvline(start_s, color="#ff4b4b", linewidth=1.5, label=f"Start {start_s:.2f}s")
+    ax.axvline(end_s,   color="#ffa64b", linewidth=1.5, label=f"End {end_s:.2f}s")
+    ax.set_xlim(0, dur)
+    ax.set_xlabel("Time (s)", color="white", fontsize=8)
+    ax.set_ylabel("Amp", color="white", fontsize=8)
+    if title:
+        ax.set_title(title, color="white", fontsize=10)
+    ax.tick_params(colors="white", labelsize=7)
+    for sp in ax.spines.values():
+        sp.set_edgecolor("#333")
+    ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=7)
+    fig.tight_layout(pad=0.3)
+    return fig
 
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
@@ -212,7 +163,9 @@ with tab_rec:
         st.session_state.recorded_audio = (y, sr)
         st.success(f"Recorded  {len(y)/sr:.1f}s  |  {sr} Hz  →  go to **Edit & Export** to process")
 
-        wavesurfer_player(mp3_bytes, label="Recording preview")
+        fig = plot_waveform(y, sr, "Recording preview")
+        st.pyplot(fig); plt.close(fig)
+        st.audio(mp3_bytes, format="audio/mp3")
 
         fname = st.text_input("Filename", value="recording.mp4")
         st.download_button(
@@ -273,9 +226,10 @@ with tab_upload:
 
     if st.session_state.uploaded_audio is not None:
         y, sr = st.session_state.uploaded_audio
-        with st.spinner("Building preview…"):
-            mp3_prev = to_mp3_bytes(y, sr)
-        wavesurfer_player(mp3_prev, label="Uploaded file preview")
+        mp3_prev = to_mp3_bytes(y, sr)
+        fig = plot_waveform(y, sr, "Uploaded file")
+        st.pyplot(fig); plt.close(fig)
+        st.audio(mp3_prev, format="audio/mp3")
         st.caption(f"Duration: {len(y)/sr:.1f}s  |  {sr} Hz")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -309,17 +263,19 @@ with tab_edit:
 
     if st.session_state.processed_audio is not None:
         y_proc_arr, _ = st.session_state.processed_audio
-        with st.spinner("Loading original…"):
-            mp3_orig = to_mp3_bytes(y_orig, sr)
-        wavesurfer_player(mp3_orig, label="Original", color="#4a9eff", progress_color="#aaaaaa")
-        with st.spinner("Loading processed…"):
-            mp3_proc = to_mp3_bytes(y_proc_arr, sr)
-        wavesurfer_player(mp3_proc, label="Processed", color="#1db954", progress_color="#ff4b4b")
+        st.caption("**Original**")
+        fig = plot_waveform(y_orig, sr)
+        st.pyplot(fig); plt.close(fig)
+        st.audio(to_mp3_bytes(y_orig, sr), format="audio/mp3")
+        st.caption("**Processed**")
+        fig = plot_waveform(y_proc_arr, sr)
+        st.pyplot(fig); plt.close(fig)
+        st.audio(to_mp3_bytes(y_proc_arr, sr), format="audio/mp3")
         y_work = y_proc_arr
     else:
-        with st.spinner("Building player…"):
-            mp3_work = to_mp3_bytes(y_orig, sr)
-        wavesurfer_player(mp3_work, label="Working audio", color="#1db954", progress_color="#ff4b4b")
+        fig = plot_waveform(y_orig, sr, "Working audio")
+        st.pyplot(fig); plt.close(fig)
+        st.audio(to_mp3_bytes(y_orig, sr), format="audio/mp3")
         y_work = y_orig
 
     st.divider()
@@ -415,10 +371,9 @@ with tab_edit:
     segment = y_work[s1:s2]
 
     if len(segment) > 0:
-        with st.spinner("Building segment preview…"):
-            mp3_seg = to_mp3_bytes(segment, sr)
-        wavesurfer_player(mp3_seg, label=f"Segment  {split_start:.2f}s → {split_end:.2f}s",
-                          color="#ffa64b", progress_color="#ff4b4b", height=80)
+        fig = plot_waveform(segment, sr, f"Segment  {split_start:.2f}s → {split_end:.2f}s")
+        st.pyplot(fig); plt.close(fig)
+        st.audio(to_mp3_bytes(segment, sr), format="audio/mp3")
 
         sc1, sc2 = st.columns(2)
         seg_name   = sc1.text_input("Segment filename", "segment.mp4")
