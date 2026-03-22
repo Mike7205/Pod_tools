@@ -218,10 +218,9 @@ with tab_rec:
 
         st.divider()
         fname = st.text_input("Save filename", value="recording.mp4")
-        fmt   = st.selectbox("Format", ["MP4", "MP3", "WAV"], key="rec_fmt")
-        dl_bytes, dl_mime = encode_for_download(y, sr, fmt)
-        dl_name = str(Path(fname).with_suffix("." + fmt.lower()))
-        st.download_button("💾  Save", dl_bytes, dl_name, dl_mime, key="dl_rec")
+        dl_bytes, dl_mime = encode_for_download(y, sr, "MP4")
+        dl_name = str(Path(fname).with_suffix(".mp4"))
+        st.download_button("💾  Save as MP4", dl_bytes, dl_name, dl_mime, key="dl_rec")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 – UPLOAD
