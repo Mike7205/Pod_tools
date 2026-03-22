@@ -4,6 +4,7 @@ Streamlit app for recording, uploading, and editing audio.
 Optimised for FSDZMIC S338 USB microphone.
 """
 
+import base64
 import io
 import os
 import subprocess
@@ -11,14 +12,12 @@ import tempfile
 from pathlib import Path
 
 import librosa
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import noisereduce as nr
 import numpy as np
 import requests
 import soundfile as sf
 import streamlit as st
+import streamlit.components.v1 as components
 from pydub import AudioSegment
 
 try:
@@ -34,36 +33,18 @@ st.set_page_config(
     layout="wide",
 )
 
-# ─── Session state init ───────────────────────────────────────────────────────
-_DEFAULTS = {
-    "recorded_audio": None,   # (np.ndarray, int) – original recording
-    "working_audio":  None,   # (np.ndarray, int) – current edited version
-}
-for k, v in _DEFAULTS.items():
+# ─── Session state ────────────────────────────────────────────────────────────
+for k, v in {
+    "recorded_audio":  None,   # (np.ndarray, int) – from Record tab
+    "uploaded_audio":  None,   # (np.ndarray, int) – from Upload tab
+    "processed_audio": None,   # (np.ndarray, int) – after noise reduction
+}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
-def list_input_devices():
-    """Return [(index, name)] for every device that has input channels."""
-    if not SOUNDDEVICE_OK:
-        return []
-    return [
-        (i, d["name"])
-        for i, d in enumerate(sd.query_devices())
-        if d["max_input_channels"] > 0
-    ]
-
-
-def to_wav_bytes(y: np.ndarray, sr: int) -> bytes:
-    buf = io.BytesIO()
-    sf.write(buf, y, sr, format="WAV")
-    return buf.getvalue()
-
-
 def load_audio_bytes(raw: bytes, filename: str = "") -> tuple[np.ndarray, int]:
-    """Load audio from raw bytes; converts via pydub/ffmpeg when needed."""
     ext = Path(filename).suffix.lower() if filename else ".wav"
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
         f.write(raw)
@@ -75,34 +56,112 @@ def load_audio_bytes(raw: bytes, filename: str = "") -> tuple[np.ndarray, int]:
     return y.astype(np.float32), int(sr)
 
 
-def plot_waveform(
-    y: np.ndarray,
-    sr: int,
-    title: str = "Waveform",
-    start_s: float = 0.0,
-    end_s: float | None = None,
-) -> plt.Figure:
-    dur = len(y) / sr
-    if end_s is None:
-        end_s = dur
-    times = np.linspace(0, dur, num=len(y))
+def to_mp3_bytes(y: np.ndarray, sr: int, bitrate: str = "192k") -> bytes:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        sf.write(tmp.name, y, sr)
+        seg = AudioSegment.from_wav(tmp.name)
+        os.unlink(tmp.name)
+    buf = io.BytesIO()
+    seg.export(buf, format="mp3", bitrate=bitrate)
+    return buf.getvalue()
 
-    fig, ax = plt.subplots(figsize=(13, 3), facecolor="#0e1117")
-    ax.set_facecolor("#0e1117")
-    ax.plot(times, y, color="#1db954", linewidth=0.35, alpha=0.9)
-    ax.axvline(start_s, color="#ff4b4b", linewidth=1.5, label=f"Start  {start_s:.2f}s")
-    ax.axvline(end_s,   color="#ffa64b", linewidth=1.5, label=f"End  {end_s:.2f}s")
-    ax.set_xlim(0, dur)
-    ax.set_xlabel("Time (s)", color="white", fontsize=9)
-    ax.set_ylabel("Amplitude", color="white", fontsize=9)
-    ax.set_title(title, color="white", fontsize=11)
-    ax.tick_params(colors="white")
-    for sp in ax.spines.values():
-        sp.set_edgecolor("#333")
-    ax.legend(facecolor="#1e1e1e", labelcolor="white", fontsize=8)
-    fig.tight_layout(pad=0.5)
-    return fig
 
+def encode_audio(y: np.ndarray, sr: int, fmt: str) -> tuple[bytes, str]:
+    """Encode numpy audio to bytes in the requested format."""
+    buf = io.BytesIO()
+    if fmt == "WAV":
+        sf.write(buf, y, sr, format="WAV")
+        return buf.getvalue(), "audio/wav"
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        sf.write(tmp.name, y, sr)
+        seg = AudioSegment.from_wav(tmp.name)
+        os.unlink(tmp.name)
+    out = io.BytesIO()
+    if fmt == "MP4":
+        seg.export(out, format="mp4", codec="aac")
+        return out.getvalue(), "audio/mp4"
+    seg.export(out, format=fmt.lower())
+    mime = {"MP3": "audio/mpeg", "FLAC": "audio/flac"}.get(fmt, "audio/octet-stream")
+    return out.getvalue(), mime
+
+
+def wavesurfer_player(mp3_bytes: bytes, label: str = "", color: str = "#1db954",
+                      progress_color: str = "#ff4b4b", height: int = 100) -> None:
+    """Embed an interactive WaveSurfer.js player."""
+    b64 = base64.b64encode(mp3_bytes).decode()
+    uid = abs(hash(label + color))
+    html = f"""
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+    <style>
+      .ws-wrap-{uid} {{ background:#0e1117; padding:10px 14px 8px; border-radius:8px; }}
+      .ws-label-{uid} {{ color:#aaa; font-size:12px; margin-bottom:6px; font-family:sans-serif; }}
+      .ws-controls-{uid} {{ display:flex; gap:10px; align-items:center; margin-top:8px; }}
+      .ws-btn-{uid} {{
+        background:#1db954; border:none; border-radius:50%; width:36px; height:36px;
+        cursor:pointer; color:#000; font-size:14px; display:flex; align-items:center; justify-content:center;
+      }}
+      .ws-btn-{uid}:hover {{ background:#17a349; }}
+      .ws-stop-{uid} {{
+        background:#555; border:none; border-radius:50%; width:30px; height:30px;
+        cursor:pointer; color:#fff; font-size:12px; display:flex; align-items:center; justify-content:center;
+      }}
+      .ws-stop-{uid}:hover {{ background:#777; }}
+      .ws-time-{uid} {{ color:#ccc; font-size:12px; font-family:monospace; margin-left:4px; }}
+    </style>
+    <div class="ws-wrap-{uid}">
+      <div class="ws-label-{uid}">{label}</div>
+      <div id="ws-{uid}"></div>
+      <div class="ws-controls-{uid}">
+        <button class="ws-btn-{uid}" id="playpause-{uid}" title="Play / Pause">
+          <i class="fa fa-play"></i>
+        </button>
+        <button class="ws-stop-{uid}" id="stop-{uid}" title="Stop">
+          <i class="fa fa-stop"></i>
+        </button>
+        <span class="ws-time-{uid}" id="time-{uid}">0:00 / 0:00</span>
+      </div>
+    </div>
+    <script>
+      (function() {{
+        const ws = WaveSurfer.create({{
+          container: '#ws-{uid}',
+          waveColor: '{color}',
+          progressColor: '{progress_color}',
+          height: {height},
+          barWidth: 2,
+          barGap: 1,
+          barRadius: 2,
+          normalize: true,
+          backend: 'WebAudio',
+        }});
+        ws.load('data:audio/mp3;base64,{b64}');
+
+        const btn  = document.getElementById('playpause-{uid}');
+        const stop = document.getElementById('stop-{uid}');
+        const time = document.getElementById('time-{uid}');
+
+        function fmt(s) {{
+          const m = Math.floor(s/60), sec = Math.floor(s%60);
+          return m+':'+(sec<10?'0':'')+sec;
+        }}
+
+        ws.on('ready', () => {{
+          time.textContent = '0:00 / ' + fmt(ws.getDuration());
+        }});
+        ws.on('audioprocess', () => {{
+          time.textContent = fmt(ws.getCurrentTime()) + ' / ' + fmt(ws.getDuration());
+        }});
+        ws.on('play',  () => btn.innerHTML = '<i class="fa fa-pause"></i>');
+        ws.on('pause', () => btn.innerHTML = '<i class="fa fa-play"></i>');
+        ws.on('finish',() => {{ btn.innerHTML = '<i class="fa fa-play"></i>'; }});
+
+        btn.addEventListener('click', () => ws.playPause());
+        stop.addEventListener('click', () => {{ ws.stop(); btn.innerHTML='<i class="fa fa-play"></i>'; }});
+      }})();
+    </script>
+    """
+    components.html(html, height=height + 90)
 
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
@@ -117,7 +176,7 @@ tab_rec, tab_upload, tab_edit = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_rec:
     st.header("Record New Audio")
-    st.caption("Uses your browser's microphone — works with any device including FSDZMIC S338.")
+    st.caption("Uses your browser's microphone — works with FSDZMIC S338 and any other device.")
 
     audio_input = st.audio_input("🎤  Click to record")
 
@@ -125,31 +184,26 @@ with tab_rec:
         raw_bytes = audio_input.read()
 
         with st.spinner("Converting…"):
-            # Write raw WAV to temp file, then convert via pydub
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp.write(raw_bytes)
                 tmp_path = tmp.name
             seg = AudioSegment.from_file(tmp_path)
             os.unlink(tmp_path)
 
-            # MP3 for playback (universally supported in all browsers)
             mp3_buf = io.BytesIO()
             seg.export(mp3_buf, format="mp3", bitrate="192k")
             mp3_bytes = mp3_buf.getvalue()
 
-            # MP4 (AAC) for download
             mp4_buf = io.BytesIO()
             seg.export(mp4_buf, format="mp4", codec="aac")
             mp4_bytes = mp4_buf.getvalue()
 
-            # Load into numpy for Edit tab
             y, sr = load_audio_bytes(raw_bytes, "recording.wav")
 
         st.session_state.recorded_audio = (y, sr)
-        st.session_state.working_audio  = (y, sr)
+        st.success(f"Recorded  {len(y)/sr:.1f}s  |  {sr} Hz  →  go to **Edit & Export** to process")
 
-        st.success(f"Recording ready — {len(y)/sr:.1f}s  |  {sr} Hz")
-        st.audio(mp3_bytes, format="audio/mp3")
+        wavesurfer_player(mp3_bytes, label="Recording preview")
 
         fname = st.text_input("Filename", value="recording.mp4")
         st.download_button(
@@ -176,8 +230,8 @@ with tab_upload:
         if uploaded and st.button("Load file"):
             with st.spinner("Loading…"):
                 y, sr = load_audio_bytes(uploaded.read(), uploaded.name)
-            st.session_state.working_audio = (y, sr)
-            st.success(f"Loaded: {uploaded.name}  |  {len(y)/sr:.1f}s  @  {sr} Hz")
+            st.session_state.uploaded_audio = (y, sr)
+            st.success(f"Loaded: {uploaded.name}  |  {len(y)/sr:.1f}s  @  {sr} Hz  →  go to **Edit & Export**")
 
     else:
         url = st.text_input("Paste a direct audio URL or YouTube / SoundCloud link")
@@ -193,7 +247,7 @@ with tab_upload:
                         wav_files = list(Path(tmp).glob("*.wav"))
                         if wav_files:
                             y, sr = librosa.load(str(wav_files[0]), sr=None, mono=True)
-                            st.session_state.working_audio = (y.astype(np.float32), int(sr))
+                            st.session_state.uploaded_audio = (y.astype(np.float32), int(sr))
                             st.success(f"Downloaded  |  {len(y)/sr:.1f}s  @  {sr} Hz")
                         else:
                             raise RuntimeError(res.stderr[:300] or "yt-dlp: no output file")
@@ -203,15 +257,17 @@ with tab_upload:
                         r.raise_for_status()
                         ext = url.split(".")[-1].split("?")[0] or "mp3"
                         y, sr = load_audio_bytes(r.content, f"file.{ext}")
-                        st.session_state.working_audio = (y, sr)
+                        st.session_state.uploaded_audio = (y, sr)
                         st.success(f"Downloaded  |  {len(y)/sr:.1f}s  @  {sr} Hz")
                     except Exception as e_http:
-                        st.error(f"yt-dlp error: {e_yt}\nDirect download error: {e_http}")
+                        st.error(f"yt-dlp: {e_yt}\nHTTP: {e_http}")
 
-    if st.session_state.working_audio is not None:
-        y, sr = st.session_state.working_audio
-        st.audio(to_wav_bytes(y, sr), format="audio/wav")
-        st.caption(f"Duration: {len(y)/sr:.1f}s  |  Sample rate: {sr} Hz")
+    if st.session_state.uploaded_audio is not None:
+        y, sr = st.session_state.uploaded_audio
+        with st.spinner("Building preview…"):
+            mp3_prev = to_mp3_bytes(y, sr)
+        wavesurfer_player(mp3_prev, label="Uploaded file preview")
+        st.caption(f"Duration: {len(y)/sr:.1f}s  |  {sr} Hz")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 – EDIT & EXPORT
@@ -219,132 +275,110 @@ with tab_upload:
 with tab_edit:
     st.header("Edit & Export")
 
-    if st.session_state.working_audio is None:
-        st.info("No audio loaded yet. Use the **Record** or **Upload** tab first.")
+    # ── Source selector ───────────────────────────────────────────────────────
+    sources = {}
+    if st.session_state.recorded_audio is not None:
+        sources["Last recording"] = st.session_state.recorded_audio
+    if st.session_state.uploaded_audio is not None:
+        sources["Uploaded file"] = st.session_state.uploaded_audio
+
+    if not sources:
+        st.info("No audio available. Use the **Record** or **Upload** tab first.")
+        st.stop()
+
+    chosen_src = st.radio("Audio source", list(sources.keys()), horizontal=True)
+    y_orig, sr = sources[chosen_src]
+    dur = len(y_orig) / sr
+
+    # Use processed version if available for the same source, else original
+    y_work = st.session_state.processed_audio[0] if st.session_state.processed_audio else y_orig
+
+    st.divider()
+
+    # ── Interactive waveform player ───────────────────────────────────────────
+    st.subheader("Waveform Player")
+
+    if st.session_state.processed_audio is not None:
+        col_orig, col_proc = st.columns(2)
+        with col_orig:
+            with st.spinner("Loading original…"):
+                mp3_orig = to_mp3_bytes(y_orig, sr)
+            wavesurfer_player(mp3_orig, label="Original", color="#4a9eff", progress_color="#aaa")
+        with col_proc:
+            y_proc_arr, _ = st.session_state.processed_audio
+            with st.spinner("Loading processed…"):
+                mp3_proc = to_mp3_bytes(y_proc_arr, sr)
+            wavesurfer_player(mp3_proc, label="Processed", color="#1db954", progress_color="#ff4b4b")
+        y_work = y_proc_arr
     else:
-        y, sr = st.session_state.working_audio
-        dur   = len(y) / sr
+        with st.spinner("Building player…"):
+            mp3_work = to_mp3_bytes(y_orig, sr)
+        wavesurfer_player(mp3_work, label="Working audio", color="#1db954", progress_color="#ff4b4b")
+        y_work = y_orig
 
-        # ── Waveform & split markers ──────────────────────────────────────────
-        st.subheader("Waveform")
-        wc1, wc2 = st.columns(2)
-        split_start = wc1.number_input("Segment start (s)", 0.0, float(dur), 0.0, 0.1)
-        split_end   = wc2.number_input("Segment end (s)",   0.0, float(dur), float(dur), 0.1)
+    st.divider()
 
-        fig = plot_waveform(y, sr, "Working Audio", split_start, split_end)
-        st.pyplot(fig)
-        plt.close(fig)
+    # ── Noise reduction & gain ────────────────────────────────────────────────
+    st.subheader("Noise Reduction & Amplification")
 
-        st.divider()
+    nc1, nc2, nc3 = st.columns(3)
+    noise_prop = nc1.slider("Noise reduction strength", 0.0, 1.0, 0.5, 0.05)
+    gain_db    = nc2.slider("Gain (dB)", -20, 40, 0)
+    stationary = nc3.checkbox("Stationary noise", value=True,
+                              help="Best for constant hum/hiss")
 
-        # ── Noise reduction & gain ────────────────────────────────────────────
-        st.subheader("Noise Reduction & Amplification")
+    bc1, bc2 = st.columns(2)
+    if bc1.button("▶  Apply & compare"):
+        with st.spinner("Processing… may take a moment"):
+            y_proc = nr.reduce_noise(y=y_orig, sr=sr,
+                                     prop_decrease=noise_prop, stationary=stationary)
+            if gain_db != 0:
+                y_proc = np.clip(y_proc * (10 ** (gain_db / 20)), -1.0, 1.0)
+            st.session_state.processed_audio = (y_proc.astype(np.float32), sr)
+        st.rerun()
 
-        nc1, nc2, nc3 = st.columns(3)
-        noise_prop = nc1.slider("Noise reduction strength", 0.0, 1.0, 0.5, 0.05)
-        gain_db    = nc2.slider("Gain (dB)", -20, 40, 0)
-        stationary = nc3.checkbox(
-            "Stationary noise model",
-            value=True,
-            help="Best for constant background hum / hiss",
-        )
+    if bc2.button("↩  Reset"):
+        st.session_state.processed_audio = None
+        st.rerun()
 
-        if st.button("▶  Apply processing"):
-            with st.spinner("Processing… this may take a moment."):
-                y_proc = nr.reduce_noise(
-                    y=y, sr=sr,
-                    prop_decrease=noise_prop,
-                    stationary=stationary,
-                )
-                if gain_db != 0:
-                    y_proc = np.clip(y_proc * (10 ** (gain_db / 20)), -1.0, 1.0)
-                st.session_state.working_audio = (y_proc.astype(np.float32), sr)
-            st.success("Processing applied! Waveform updated.")
-            st.rerun()
+    st.divider()
 
-        if st.button("↩  Reset to original recording"):
-            if st.session_state.recorded_audio:
-                st.session_state.working_audio = st.session_state.recorded_audio
-                st.rerun()
-            else:
-                st.warning("No original recording in memory – re-upload the file.")
+    # ── Split & save ─────────────────────────────────────────────────────────
+    st.subheader("Split & Save")
 
-        st.divider()
+    wc1, wc2 = st.columns(2)
+    split_start = wc1.number_input("Segment start (s)", 0.0, float(dur), 0.0, 0.1)
+    split_end   = wc2.number_input("Segment end (s)",   0.0, float(dur), float(dur), 0.1)
 
-        # ── Segment preview & save ────────────────────────────────────────────
-        st.subheader("Split & Save Segment")
+    s1 = max(0, int(split_start * sr))
+    s2 = min(len(y_work), int(split_end * sr))
+    segment = y_work[s1:s2]
 
-        s1 = max(0, int(split_start * sr))
-        s2 = min(len(y), int(split_end * sr))
-        segment = y[s1:s2]
-
-        if len(segment) > 0:
-            st.audio(to_wav_bytes(segment, sr), format="audio/wav")
-            st.caption(
-                f"Segment: {split_start:.2f}s → {split_end:.2f}s  "
-                f"({split_end - split_start:.2f}s)"
-            )
+    if len(segment) > 0:
+        with st.spinner("Building segment preview…"):
+            mp3_seg = to_mp3_bytes(segment, sr)
+        wavesurfer_player(mp3_seg, label=f"Segment  {split_start:.2f}s → {split_end:.2f}s",
+                          color="#ffa64b", progress_color="#ff4b4b", height=80)
 
         sc1, sc2 = st.columns(2)
-        seg_name   = sc1.text_input("Segment filename", "segment.wav")
-        seg_format = sc2.selectbox("Format", ["WAV", "MP3", "FLAC"], key="seg_fmt")
+        seg_name   = sc1.text_input("Segment filename", "segment.mp4")
+        seg_format = sc2.selectbox("Format", ["MP4", "MP3", "WAV", "FLAC"], key="seg_fmt")
 
-        if len(segment) == 0:
-            st.warning("Segment is empty – adjust start / end times.")
-        else:
-            def _encode(data: np.ndarray, rate: int, fmt: str) -> tuple[bytes, str]:
-                buf = io.BytesIO()
-                if fmt == "WAV":
-                    sf.write(buf, data, rate, format="WAV")
-                    return buf.getvalue(), "audio/wav"
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                    sf.write(tmp.name, data, rate)
-                    audio_seg = AudioSegment.from_wav(tmp.name)
-                    os.unlink(tmp.name)
-                out_buf = io.BytesIO()
-                audio_seg.export(out_buf, format=fmt.lower())
-                mime = "audio/mpeg" if fmt == "MP3" else "audio/flac"
-                return out_buf.getvalue(), mime
+        seg_bytes, seg_mime = encode_audio(segment, sr, seg_format)
+        seg_fname = str(Path(seg_name).with_suffix("." + seg_format.lower()))
+        st.download_button("💾  Save segment", seg_bytes, seg_fname, seg_mime, key="dl_seg")
+    else:
+        st.warning("Segment is empty – adjust start / end.")
 
-            seg_bytes, seg_mime = _encode(segment, sr, seg_format)
-            seg_fname = str(Path(seg_name).with_suffix("." + seg_format.lower()))
-            st.download_button(
-                label="💾  Save segment to disk",
-                data=seg_bytes,
-                file_name=seg_fname,
-                mime=seg_mime,
-                key="dl_seg",
-            )
+    st.divider()
 
-        st.divider()
+    # ── Save full audio ───────────────────────────────────────────────────────
+    st.subheader("Save Full Audio")
 
-        # ── Save full working audio ───────────────────────────────────────────
-        st.subheader("Save Full Audio")
+    fc1, fc2 = st.columns(2)
+    full_name   = fc1.text_input("Output filename", "output.mp4")
+    full_format = fc2.selectbox("Format", ["MP4", "MP3", "WAV", "FLAC"], key="full_fmt")
 
-        fc1, fc2 = st.columns(2)
-        full_name   = fc1.text_input("Output filename", "output.wav")
-        full_format = fc2.selectbox("Format", ["WAV", "MP3", "FLAC"], key="full_fmt")
-
-        def _encode_full(data: np.ndarray, rate: int, fmt: str) -> tuple[bytes, str]:
-            buf = io.BytesIO()
-            if fmt == "WAV":
-                sf.write(buf, data, rate, format="WAV")
-                return buf.getvalue(), "audio/wav"
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                sf.write(tmp.name, data, rate)
-                audio_seg = AudioSegment.from_wav(tmp.name)
-                os.unlink(tmp.name)
-            out_buf = io.BytesIO()
-            audio_seg.export(out_buf, format=fmt.lower())
-            mime = "audio/mpeg" if fmt == "MP3" else "audio/flac"
-            return out_buf.getvalue(), mime
-
-        full_bytes, full_mime = _encode_full(y, sr, full_format)
-        full_fname = str(Path(full_name).with_suffix("." + full_format.lower()))
-        st.download_button(
-            label="💾  Save full audio to disk",
-            data=full_bytes,
-            file_name=full_fname,
-            mime=full_mime,
-            key="dl_full",
-        )
+    full_bytes, full_mime = encode_audio(y_work, sr, full_format)
+    full_fname = str(Path(full_name).with_suffix("." + full_format.lower()))
+    st.download_button("💾  Save full audio", full_bytes, full_fname, full_mime, key="dl_full")
